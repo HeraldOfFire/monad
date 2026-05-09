@@ -284,44 +284,13 @@ EOT;
             }
         }
 
-        echo "
-        <!DOCTYPE html>
-        <html lang='en'>
-        <head>
-            <meta charset='UTF-8'>
-            <title>$class: $msg</title>
-            <style>
-                body { background: #0f0f10; color: #e0e0e0; font-family: 'Inter', system-ui, sans-serif; line-height: 1.6; margin: 0; padding: 2rem; }
-                .container { max-width: 1000px; margin: 0 auto; }
-                .header { border-left: 4px solid #ff4444; padding-left: 1.5rem; margin-bottom: 2rem; }
-                .type { color: #ff4444; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px; font-weight: bold; }
-                .msg { font-size: 1.8rem; font-weight: 600; margin: 0.5rem 0; color: #fff; }
-                .file { color: #888; font-family: monospace; font-size: 0.9rem; }
-                .snippet { background: #1a1a1c; border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 2rem 0; border: 1px solid #333; }
-                .trace { font-family: monospace; font-size: 0.85rem; color: #aaa; background: #151517; padding: 1rem; border-radius: 8px; }
-                .trace-item { margin-bottom: 0.5rem; border-bottom: 1px solid #222; padding-bottom: 0.5rem; }
-            </style>
-        </head>
-        <body>
-            <div class='container'>
-                <div class='header'>
-                    <div class='type'>$class</div>
-                    <div class='msg'>$msg</div>
-                    <div class='file'>$file : $line</div>
-                </div>
-                <div class='snippet'>$snippet</div>
-                <h3>Stack Trace</h3>
-                <div class='trace'>";
-                foreach ($e->getTrace() as $i => $t) {
-                    $f = htmlspecialchars($t['file'] ?? 'internal');
-                    $l = $t['line'] ?? '?';
-                    $fn = htmlspecialchars(($t['class'] ?? '') . ($t['type'] ?? '') . ($t['function'] ?? 'unknown'));
-                    echo "<div class='trace-item'>#$i <strong>$f($l)</strong>: $fn()</div>";
-                }
-        echo "</div></div>
-        </body>
-        </html>
-        ";
+        $css = "body{background:#0f0f10;color:#e0e0e0;font-family:system-ui,sans-serif;padding:2rem}.container{max-width:1000px;margin:0 auto}.header{border-left:4px solid #ff4444;padding-left:1.5rem;margin-bottom:2rem}.type{color:#ff4444;font-size:.9rem;font-weight:bold;text-transform:uppercase}.msg{font-size:1.8rem;font-weight:600;margin:.5rem 0;color:#fff}.file{color:#888;font-family:monospace}.snippet{background:#1a1a1c;padding:1rem;overflow-x:auto;margin:2rem 0;border:1px solid #333;border-radius:8px}.trace{font-family:monospace;font-size:.85rem;color:#aaa;background:#151517;padding:1rem;border-radius:8px}.trace-item{margin-bottom:.5rem;border-bottom:1px solid #222;padding-bottom:.5rem}";
+        echo "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>$class</title><style>$css</style></head><body><div class='container'><div class='header'><div class='type'>$class</div><div class='msg'>$msg</div><div class='file'>$file : $line</div></div><div class='snippet'>$snippet</div><h3>Stack Trace</h3><div class='trace'>";
+        foreach ($e->getTrace() as $i => $t) {
+            $f = htmlspecialchars($t['file'] ?? 'internal'); $l = $t['line'] ?? '?'; $fn = htmlspecialchars(($t['class'] ?? '') . ($t['type'] ?? '') . ($t['function'] ?? 'unknown'));
+            echo "<div class='trace-item'>#$i <strong>$f($l)</strong>: $fn()</div>";
+        }
+        echo "</div></div></body></html>";
         exit;
     }
 ]);
