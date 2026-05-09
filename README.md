@@ -23,7 +23,8 @@ It is **NOT** recommended for massive enterprise monoliths where strict static t
 
 ---
 
-## Installation
+## Quickstart
+Monad requires **PHP 8.0+** and **PDO extension**.
 
 1.  Clone the repository or copy `index.php`.
 2.  Start the PHP development server:
@@ -51,7 +52,41 @@ $app = new App([
 echo $app->greet('World');
 ```
 
----
+## Services
+Monad acts as a giant Dependency Injection (DI) Container.
+You can register your own services using `$app->bind()` and access them using magic properties.
+
+```php
+$app->bind('myService', function($app) {
+    return new MyService();
+});
+
+$app->myService->sayHello();
+```
+
+This works, but you won't get any autocompletion for it. To fix that, just use the class/interface name as binding key and then retrieve the service using `$app->get()`:
+
+```php
+$app->bind(MyService::class, function($app) {
+    return new MyService();
+});
+
+$myService = $app->get(MyService::class);
+$myService->sayHello(); // Autocomplete works fine :)
+```
+You can even override default services just by binding them again:
+```php
+// Re-bind the internal db service to your custom implementation
+$app->bind('db', function($app) {
+    return new MyCustomDB(); // Must implement Monad\DB interface!
+});
+
+// Now you can use your custom DB implementation
+$app->db->select('users', ['id' => 1]);
+``` 
+Just remember that when overriding internal services, custom services **must implement Monad interfaces** (i.e. `Monad\DB`) and you won't get any custom methods autocompletion for them.
+
+--- 
 
 ## Routing and Middleware
 
@@ -186,19 +221,7 @@ $app->addRoute('GET', '/login', function($app) {
 <input type="hidden" name="_csrf" value="<?= $view->string('csrf') ?>">
 ```
 
-### 2. Overriding Core Services
-Monad acts as a giant Dependency Injection (DI) Container. Because all core functionalities are registered using `$app->bind()`, you can easily overwrite any service (like `db`, `logger`, or `response`) with your own custom implementation simply by binding it again before adding your routes.
-
-```php
-// Example: Overwrite the default logger to write to a file
-$app->bind('logger', function($app) {
-    return function($msg) {
-        file_put_contents(__DIR__ . '/app.log', "[CUSTOM] " . $msg . PHP_EOL, FILE_APPEND);
-    };
-});
-```
-
-### 3. Production Deployment
+### 2. Production Deployment
 Since Monad routes everything through a single file, you need to configure your web server (like Nginx or Apache) to send all traffic to `index.php`. 
 
 Example for **Nginx**:
@@ -208,12 +231,12 @@ location / {
 }
 ```
 
-### 4. IDE Autocompletion in Templates
+### 3. IDE Autocompletion in Templates
 Monad is designed to be fully compatible with your IDE's autocompletion. To enable it, simply add this PHPDoc block at the top of every template:
 ```php
 <?php /** @var Monad\View $view */ ?>
 ```
 This will give you instant intellisense for `$view->session`, `$view->request`, and all helper methods like `$view->string()` and `$view->partial()`.
 
-### 5. Dev-Friendly Error Page
+### 4. Dev-Friendly Error Page
 When `debug = true` in your `monad.ini`, Monad catches any unhandled exceptions or fatal errors and displays a beautiful, dev-friendly HTML error page showing the exact file, line number, and a full stack trace. When `debug = false` (e.g. in production), it safely hides the details and returns a generic 500 Server Error to protect your application.

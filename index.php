@@ -121,7 +121,18 @@ class MagicObject {
  * @property-read Response $response
  * @property-read object $config
  */
-class App extends MagicObject {}
+class App extends MagicObject {
+    /**
+     * Resolves a bound service from the container.
+     * 
+     * @template T of object
+     * @param class-string<T> $name
+     * @return T
+     */
+    public function get(string $name): mixed {
+        return $this->__get($name);
+    }
+}
 
 /**
  * Composer Integration & Minimalist Autoloader.
