@@ -6,7 +6,8 @@ Monad is an experimental, ultra-lightweight PHP micro-framework contained in a s
 *   **Monofile Core**: The entire framework engine resides in `index.php`.
 *   **Zero Dependencies**: Works standalone. If you use Composer, `vendor/autoload.php` is automatically detected and integrated.
 *   **HTMX First**: Intelligent layout and HTMX header management to build Single Page Applications (SPA) writing only PHP and HTML.
-*   **Strict View Context**: Security first. Views do not have implicit access to raw data, preventing XSS vulnerabilities.
+*   **Fluent & Recursive View Context**: Security first with a modern twist. Views are recursive objects that provide fluent helpers and automatic XSS protection.
+*   **Onion Middleware**: A recursive middleware system that allows processing requests both "on the way in" and "on the way out".
 *   **MagicObject**: The heart of Monad. It allows defining dynamic behaviors and lazy-loading with a clean and expressive syntax.
 
 ---
@@ -115,40 +116,43 @@ Full controllers are supported by passing an array `[Class::class, 'method']`.
 
 ---
 
-## Views and Templates (Strict View Context)
+## Views and Templates
 
-PHP works fine as a templating language, but Monad gives you the tools to use it safely: variables are not globally "extracted". You must use helpers to print them.
-
-Templates are resolved using **dot notation** starting from the location of `index.php`. There are no hidden folders or configurations. For example, `html.admin.dashboard` perfectly maps to `__DIR__ . '/html/admin/dashboard.php'`.
+PHP is your templating engine, and Monad makes it safe and elegant. Data passed to the view is wrapped in a **recursive** context that provides automatic escaping and fluent helpers.
 
 ### Rendering
 ```php
 $app->response->layout = 'html.main_layout';
-$app->response->render('html.pages.home', ['username' => 'Sam']);
+$app->response->render('html.pages.home', [
+    'user' => ['name' => 'Sam', 'balance' => 1250.50],
+    'items' => [['name' => 'Pizza', 'price' => 12], ['name' => 'Soda', 'price' => 2]]
+]);
 ```
 
 ### Inside the Template (`html/pages/home.php`)
-```html
+```php
 <?php /** @var Monad\View $view */ ?>
 
-<!-- Secure Access (Escaped for XSS) -->
-<h1>Welcome, <?= $view->string('username') ?></h1>
+<!-- Automatic Escaping (XSS Protected) -->
+<h1>Welcome, <?= $view->data->user->name ?></h1>
 
-<!-- Access to numerical data and dates -->
-<p>Visits: <?= $view->number('visits') ?></p>
-<p>Today: <?= $view->date('today', 'm/d/Y') ?></p>
+<!-- Fluent Helpers -->
+<p>Balance: <?= $view->data->user->balance->number(2) ?> €</p>
 
-<!-- Unprotected access to raw data (Use with caution!) -->
-<?php $userObj = $view->raw('user_object'); ?>
-
-<!-- Include another partial template -->
-<?= $view->partial('html.components.status_bar') ?>
+<!-- Recursive Loops -->
+<ul>
+    <?php foreach ($view->data->items as $item): ?>
+        <li><?= $item->name ?>: <?= $item->price->number(2) ?> €</li>
+    <?php endforeach; ?>
+</ul>
 
 <!-- Access to the global context ($session, $config, $request) -->
 <?php if ($view->session->has('auth')): ?>
-    <p>You are logged in.</p>
+    <p>Logged in as <?= $view->session->get('username') ?></p>
 <?php endif; ?>
 ```
+
+Templates are resolved using **dot notation** relative to the project root. For example, `html.admin.dashboard` maps to `./html/admin/dashboard.php`.
 
 ---
 
@@ -168,7 +172,7 @@ $app->response->render('user_list', [...]);
 
 ---
 
-## Database and Micro Query-Builder
+## Database
 
 Monad uses SQLite by default (configurable in `monad.ini`).
 The DB service includes quick methods to avoid writing tedious SQL boilerplate:
@@ -217,6 +221,47 @@ chmod +x monad
 
 ---
 
+## Embedding Monad in Other Applications
+
+Monad is great on its own, but it's also designed to be embeddable. If you `require` or `include` `index.php` from another script, it will **not** execute the router automatically. Instead, it will return the `$app` instance, allowing you to use Monad as a service container or a library.
+
+### Use Monad in standalone scripts
+You can reuse your database connection, configuration, and services in cron jobs or background tasks:
+
+```php
+// cron.php
+$app = require 'index.php';
+
+// Reuse the DB service
+$users = $app->db->fetchAll("SELECT * FROM users WHERE active = 0");
+echo "Found " . count($users) . " inactive users.";
+```
+
+### Manual Dispatching
+If you embed Monad in another framework or a custom entry point, you can trigger the routing manually. One example of this is Monad's own testing script (see below).
+
+---
+
+## Testing
+
+### Run tests via CLI
+The easiest way to run the tests is through the Monad CLI:
+
+```bash
+./monad test
+```
+
+### Run tests manually
+Alternatively, you can run the test script directly with PHP:
+
+```bash
+php test.php
+```
+
+All tests are designed to run in isolation using an in-memory SQLite database, so they won't affect your development data.
+
+---
+
 ## Configuration (`monad.ini`)
 
 The `monad.ini` file manages settings. Monad automatically loads these values into both `$app->config` and **Environment Variables** (`getenv()`).
@@ -245,7 +290,7 @@ $app->addRoute('GET', '/login', function($app) {
 ```
 ```html
 <!-- In your template -->
-<input type="hidden" name="_csrf" value="<?= $view->string('csrf') ?>">
+<input type="hidden" name="_csrf" value="<?= $view->csrf ?>">
 ```
 
 ### 2. Production Deployment
@@ -258,12 +303,5 @@ location / {
 }
 ```
 
-### 3. IDE Autocompletion in Templates
-Monad is designed to be fully compatible with your IDE's autocompletion. To enable it, simply add this PHPDoc block at the top of every template:
-```php
-<?php /** @var Monad\View $view */ ?>
-```
-This will give you instant intellisense for `$view->session`, `$view->request`, and all helper methods like `$view->string()` and `$view->partial()`.
-
-### 4. Dev-Friendly Error Page
+### 3. Dev-Friendly Error Page
 When `debug = true` in your `monad.ini`, Monad catches any unhandled exceptions or fatal errors and displays a beautiful, dev-friendly HTML error page showing the exact file, line number, and a full stack trace. When `debug = false` (e.g. in production), it safely hides the details and returns a generic 500 Server Error to protect your application.

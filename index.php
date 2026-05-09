@@ -61,54 +61,75 @@ interface Response {
 }
 
 /**
+ * @property-read ViewContext $data
  * @property-read MagicObject $config
- * @property-read Request $request
- * @property-read Session $session
+ * @property-read MagicObject $session
+ * @property-read MagicObject $request
+ * @property-read MagicValue|ViewContext $balance
+ * @property-read MagicValue|ViewContext $prefix
  * 
  * @method string partial(string $template, array $data = [])
- * @method mixed raw(string $key)
- * @method string string(string $key)
- * @method string number(string $key, int $decimals = 0)
- * @method string date(string $key, string $format = \DATE_ATOM)
  */
-interface View {}
+interface View extends \IteratorAggregate, \ArrayAccess, \Countable {}
 
 /**
- * Base class for dynamic, magic-enabled objects.
+ * @method string number(int $decimals = 0)
+ * @method string date(string $format = 'Y-m-d')
+ * @method mixed default(mixed $fallback)
+ * @method string json()
+ * @method mixed raw()
  */
+class MagicValue {
+    public function __construct(private mixed $v) {}
+    public function __toString(): string { return htmlspecialchars((string)($this->v ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
+    public function number(int $d = 0): string { return number_format((float)($this->v ?? 0), $d); }
+    public function date(string $f = 'Y-m-d'): string { return date($f, is_numeric($this->v) ? (int)$this->v : strtotime((string)($this->v ?? 'now'))); }
+    public function default(mixed $f): mixed { return empty($this->v) ? new MagicValue($f) : $this; }
+    public function json(): string { return htmlspecialchars(json_encode($this->v), ENT_QUOTES, 'UTF-8'); }
+    public function raw() { return $this->v; }
+}
+
 class MagicObject {
     protected array $props;
     public function __construct(array $props) { $this->props = $props; }
 
-    public function &__get(string $name): mixed {
+    public function __get(string $name): mixed {
         if (array_key_exists($name, $this->props)) return $this->props[$name];
         if (isset($this->props['registry'][$name]) && $this->props['registry'][$name] instanceof \Closure) {
             $this->props[$name] = $this->props['registry'][$name]->call($this, $this);
             return $this->props[$name];
         }
         if (isset($this->props['registry'][$name])) return $this->props['registry'][$name];
-        $null = null; return $null;
+        return null;
     }
 
     public function __isset(string $name): bool { 
         return array_key_exists($name, $this->props) || isset($this->props['registry'][$name]); 
     }
 
-    public function __set(string $name, mixed $value): void {
-        $this->props[$name] = $value;
-    }
-
-    public function props(): array {
-        return $this->props;
-    }
+    public function __set(string $name, mixed $value): void { $this->props[$name] = $value; }
+    public function __unset(string $name): void { unset($this->props[$name]); }
+    public function props(): array { return $this->props; }
 
     public function __call(string $name, array $args): mixed {
         $callable = $this->props[$name] ?? $this->props['registry'][$name] ?? null;
-        if (!$callable || !is_callable($callable)) {
-            throw new \BadMethodCallException("Call to undefined method " . static::class . "::$name()");
-        }
+        if (!$callable || !is_callable($callable)) throw new \BadMethodCallException("Undefined method $name");
         return ($callable instanceof \Closure) ? $callable->call($this, $this, ...$args) : $callable($this, ...$args);
     }
+}
+
+class ViewContext extends MagicObject implements View {
+    public function __get(string $name): mixed {
+        $v = parent::__get($name);
+        if (is_array($v)) return new ViewContext($v);
+        return (is_object($v) || $v === null) ? $v : new MagicValue($v);
+    }
+    public function getIterator(): \Traversable { foreach ($this->props as $k => $v) yield $k => $this->__get($k); }
+    public function offsetExists($o): bool { return isset($this->props[$o]); }
+    public function offsetGet($o): mixed { return $this->__get($o); }
+    public function offsetSet($o, $v): void { $this->props[$o] = $v; }
+    public function offsetUnset($o): void { unset($this->props[$o]); }
+    public function count(): int { return count($this->props); }
 }
 
 /**
@@ -180,37 +201,40 @@ EOT;
                     echo "  " . str_pad("[$method]", 7) . " $path" . " [$cntrl] " . ($mwStr ? "($mw)" : "") . "\n";
                 }   
             }
+        },
+        'test' => function($app) {
+            passthru('php ' . __DIR__ . '/test.php');
         }
     ],
     'groupStack' => [],
     'bind' => function ($app, string $name, mixed $value) { 
         unset($this->props[$name]); 
-        $this->registry[$name] = $value; 
+        $this->props['registry'][$name] = $value; 
     },
-    'use' => function ($app, mixed $m) { $this->globalMiddleware[] = $m; },
+    'use' => function ($app, mixed $m) { $this->props['globalMiddleware'][] = $m; },
     'group' => function ($app, string $prefix, array $mw, callable $callback) {
-        $this->groupStack[] = ['prefix' => $prefix, 'middleware' => $mw];
+        $this->props['groupStack'][] = ['prefix' => $prefix, 'middleware' => $mw];
         $callback($this);
-        array_pop($this->groupStack);
+        array_pop($this->props['groupStack']);
     },
     'addRoute' => function ($app, string $m, string $p, mixed $h, array $mw = []) {
         $prefix = '';
         $groupMw = [];
-        foreach ($this->groupStack as $g) {
+        foreach ($this->props['groupStack'] as $g) {
             $prefix .= $g['prefix'];
             $groupMw = array_merge($groupMw, $g['middleware']);
         }
         $path = $prefix . $p;
         $allMw = array_merge($groupMw, $mw);
         $pattern = '#^' . preg_replace('#:([a-zA-Z_][a-zA-Z0-9_]*)#', '(?P<$1>[^/]+)', $path) . '$#';
-        $this->routes[strtoupper($m)][] = ['path' => $path, 'pattern' => $pattern, 'handler' => $h, 'middleware' => $allMw];
+        $this->props['routes'][strtoupper($m)][] = ['path' => $path, 'pattern' => $pattern, 'handler' => $h, 'middleware' => $allMw];
     },
     'addCommand' => function ($app, string $name, callable $handler) {
-        $this->commands[$name] = $handler;
+        $this->props['commands'][$name] = $handler;
     },
     'dispatch' => function ($app) {
-        if (php_sapi_name() === 'cli' && !defined('MONAD_TESTING')) {
-            global $argv;
+        if (php_sapi_name() === 'cli' && !isset($_SERVER['REQUEST_METHOD'])) {
+            $argv = $_SERVER['argv'] ?? $GLOBALS['argv'] ?? [];
             $cmdName = $argv[1] ?? 'help';
             $args = array_slice($argv, 2);
             if (isset($this->commands[$cmdName])) {
@@ -236,7 +260,14 @@ EOT;
                 break;
             }
         }
-        if (!$matched) { $this->response->setStatusCode(404); echo "404 Not Found"; return; }
+        if (!$matched) { 
+            $this->response->setStatusCode(404);
+            if (($this->request->getHeader('Accept') ?? '') === 'application/json') {
+                $this->response->json(['error' => 'Not Found'], 404);
+                return;
+            }
+            return; 
+        }
         
         $resolver = function ($mw) {
             return is_string($mw) ? ($this->registry[$mw] ?? $mw) : $mw;
@@ -263,7 +294,9 @@ EOT;
         if ($this->response->statusCode === 200) $this->response->setStatusCode(500);
         $app->logger("ERROR: " . $e->getMessage());
         if (!($this->config->debug ?? false)) {
-            $this->response->json(['error' => 'Internal Server Error']);
+            if (($this->request->getHeader('Accept') ?? '') === 'application/json') {
+                $this->response->json(['error' => 'Internal Server Error']);
+            }
             return;
         }
         $msg = htmlspecialchars($e->getMessage());
@@ -279,19 +312,31 @@ EOT;
             for ($i = $start; $i < $end; $i++) {
                 $num = $i + 1;
                 $content = htmlspecialchars($lines[$i]);
-                $style = ($num === $line) ? "background:#441111;color:#ff5555;font-weight:bold;" : "";
-                $snippet .= "<div style='display:flex;$style'><span style='width:3em;opacity:0.5;user-select:none;'>$num</span><code>$content</code></div>";
+                $st = ($num === $line) ? "background:#441111;color:#ff5555;font-weight:bold;" : "";
+                $snippet .= "<div style='display:flex;$st'><span style='width:3em;opacity:0.5;user-select:none;'>$num</span><code>$content</code></div>";
             }
         }
 
-        $css = "body{background:#0f0f10;color:#e0e0e0;font-family:system-ui,sans-serif;padding:2rem}.container{max-width:1000px;margin:0 auto}.header{border-left:4px solid #ff4444;padding-left:1.5rem;margin-bottom:2rem}.type{color:#ff4444;font-size:.9rem;font-weight:bold;text-transform:uppercase}.msg{font-size:1.8rem;font-weight:600;margin:.5rem 0;color:#fff}.file{color:#888;font-family:monospace}.snippet{background:#1a1a1c;padding:1rem;overflow-x:auto;margin:2rem 0;border:1px solid #333;border-radius:8px}.trace{font-family:monospace;font-size:.85rem;color:#aaa;background:#151517;padding:1rem;border-radius:8px}.trace-item{margin-bottom:.5rem;border-bottom:1px solid #222;padding-bottom:.5rem}";
-        echo "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>$class</title><style>$css</style></head><body><div class='container'><div class='header'><div class='type'>$class</div><div class='msg'>$msg</div><div class='file'>$file : $line</div></div><div class='snippet'>$snippet</div><h3>Stack Trace</h3><div class='trace'>";
+        $css = "#monad-error{background:#0f0f10;color:#e0e0e0;font-family:system-ui,sans-serif;padding:2rem;position:fixed;top:0;left:0;width:100%;height:100%;overflow:auto;z-index:999999}
+                #monad-error .cnt{max-width:1000px;margin:0 auto}
+                #monad-error .hdr{border-left:4px solid #ff4444;padding-left:1.5rem;margin-bottom:2rem}
+                #monad-error .type{color:#ff4444;font-size:.9rem;font-weight:bold;text-transform:uppercase}
+                #monad-error .msg{font-size:1.8rem;font-weight:600;margin:.5rem 0;color:#fff}
+                #monad-error .file{color:#888;font-family:monospace}
+                #monad-error .snip{background:#1a1a1c;padding:1rem;overflow-x:auto;margin:2rem 0;border:1px solid #333;border-radius:8px}
+                #monad-error .trc{font-family:monospace;font-size:.85rem;color:#aaa;background:#151517;padding:1rem;border-radius:8px}
+                #monad-error .item{margin-bottom:.5rem;border-bottom:1px solid #222;padding-bottom:.5rem}";
+
+        echo "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Error: $msg</title><style>$css</style></head><body>
+        <div id='monad-error'><div class='cnt'>
+            <div class='hdr'><div class='type'>$class</div><div class='msg'>$msg</div><div class='file'>$file : $line</div></div>
+            <div class='snip'>$snippet</div>
+            <h3>Stack Trace</h3><div class='trc'>";
         foreach ($e->getTrace() as $i => $t) {
             $f = htmlspecialchars($t['file'] ?? 'internal'); $l = $t['line'] ?? '?'; $fn = htmlspecialchars(($t['class'] ?? '') . ($t['type'] ?? '') . ($t['function'] ?? 'unknown'));
-            echo "<div class='trace-item'>#$i <strong>$f($l)</strong>: $fn()</div>";
+            echo "<div class='item'>#$i <strong>$f($l)</strong>: $fn()</div>";
         }
-        echo "</div></div></body></html>";
-        exit;
+        echo "</div></div></div></body></html>";
     }
 ]);
 
@@ -309,8 +354,7 @@ set_exception_handler(function (Throwable $e) use ($app) {
 $app->bind('config', function() {
     $file = __DIR__ . '/monad.ini';
     $data = file_exists($file) ? parse_ini_file($file, true) : [];
-    
-    // Inject into Environment Variables
+
     $setEnv = function($array, $prefix = '') use (&$setEnv) {
         foreach ($array as $key => $value) {
             $name = strtoupper($prefix . $key);
@@ -330,8 +374,9 @@ $app->bind('config', function() {
 });
 
 $app->bind('db', function($app) {
-    $dbPath = __DIR__ . '/' . ($app->config->db['path'] ?? 'db.sqlite');
-    $pdo = new PDO('sqlite:' . $dbPath);
+    $path = $app->config->db['path'] ?? 'db.sqlite';
+    $dsn = ($path === ':memory:') ? 'sqlite::memory:' : 'sqlite:' . __DIR__ . '/' . $path;
+    $pdo = new PDO($dsn);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
     $pdo->exec('PRAGMA foreign_keys = ON;');
@@ -342,28 +387,41 @@ $app->bind('db', function($app) {
         'fetchAll' => function ($db, string $sql, array $params = []): array { return $db->query($sql, $params)->fetchAll(); },
         'execute' => function ($db, string $sql, array $params = []): int { return $db->query($sql, $params)->rowCount(); },
         'insert' => function ($db, string $table, array $data): int {
-            $cols = implode(', ', array_keys($data));
-            $pl = implode(', ', array_map(fn($k) => ":$k", array_keys($data)));
+            $safeKeys = array_filter(array_keys($data), fn($k) => preg_match('/^[a-zA-Z0-9_]+$/', $k));
+            if (count($safeKeys) !== count($data)) throw new \InvalidArgumentException("Invalid column name in insert data");
+            $cols = implode(', ', $safeKeys);
+            $pl = implode(', ', array_map(fn($k) => ":$k", $safeKeys));
             $db->execute("INSERT INTO $table ($cols) VALUES ($pl)", $data);
             return (int) $db->pdo->lastInsertId();
         },
         'update' => function ($db, string $table, array $data, array $where): int {
-            $set = implode(', ', array_map(fn($k) => "$k = :set_$k", array_keys($data)));
-            $cond = implode(' AND ', array_map(fn($k) => "$k = :wh_$k", array_keys($where)));
+            $safeDataKeys = array_filter(array_keys($data), fn($k) => preg_match('/^[a-zA-Z0-9_]+$/', $k));
+            $safeWhereKeys = array_filter(array_keys($where), fn($k) => preg_match('/^[a-zA-Z0-9_]+$/', $k));
+            if (count($safeDataKeys) !== count($data) || count($safeWhereKeys) !== count($where)) throw new \InvalidArgumentException("Invalid column name in update data");
+            $set = implode(', ', array_map(fn($k) => "$k = :set_$k", $safeDataKeys));
+            $cond = implode(' AND ', array_map(fn($k) => "$k = :wh_$k", $safeWhereKeys));
             $params = [];
             foreach ($data as $k => $v) $params["set_$k"] = $v;
             foreach ($where as $k => $v) $params["wh_$k"] = $v;
             return $db->execute("UPDATE $table SET $set WHERE $cond", $params);
         },
         'delete' => function ($db, string $table, array $where): int {
-            $cond = implode(' AND ', array_map(fn($k) => "$k = :$k", array_keys($where)));
+            $safeWhereKeys = array_filter(array_keys($where), fn($k) => preg_match('/^[a-zA-Z0-9_]+$/', $k));
+            if (count($safeWhereKeys) !== count($where)) throw new \InvalidArgumentException("Invalid column name in delete data");
+            $cond = implode(' AND ', array_map(fn($k) => "$k = :$k", $safeWhereKeys));
             return $db->execute("DELETE FROM $table WHERE $cond", $where);
         }
     ]);
 });
 
 $app->bind('session', function() {
-    if (session_status() === PHP_SESSION_NONE) session_start();
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start([
+            'cookie_httponly' => true,
+            'cookie_samesite' => 'Lax',
+            'use_strict_mode' => true
+        ]);
+    }
     return new MagicObject([
         'get' => fn ($_, string $name) => $_SESSION[$name] ?? null,
         'has' => fn ($_, string $name) => array_key_exists($name, $_SESSION),
@@ -393,7 +451,7 @@ $app->bind('csrf', function($app) {
 });
 
 $app->bind('request', function($app) {
-    $getHeader = fn($n) => $_SERVER['HTTP_' . strtoupper(str_replace('-', '_', $n))] ?? null;
+    $getHeader = fn($_, $n) => $_SERVER['HTTP_' . strtoupper(str_replace('-', '_', (string)$n))] ?? null;
     return new MagicObject([
         'method' => $_SERVER['REQUEST_METHOD'] ?? 'GET',
         'path' => parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/',
@@ -402,12 +460,12 @@ $app->bind('request', function($app) {
         'getHeader' => $getHeader,
         'body' => function () { static $c = null; if ($c === null) $c = file_get_contents('php://input'); return $c; },
         'htmx' => new MagicObject([
-            'is' => ($getHeader('HX-Request') === 'true'),
-            'target' => $getHeader('HX-Target'),
-            'trigger' => $getHeader('HX-Trigger'),
-            'triggerName' => $getHeader('HX-Trigger-Name'),
-            'boosted' => ($getHeader('HX-Boosted') === 'true'),
-            'currentUrl' => $getHeader('HX-Current-URL'),
+            'is' => ($getHeader(null, 'HX-Request') === 'true'),
+            'target' => $getHeader(null, 'HX-Target'),
+            'trigger' => $getHeader(null, 'HX-Trigger'),
+            'triggerName' => $getHeader(null, 'HX-Trigger-Name'),
+            'boosted' => ($getHeader(null, 'HX-Boosted') === 'true'),
+            'currentUrl' => $getHeader(null, 'HX-Current-URL'),
         ])
     ]);
 });
@@ -420,20 +478,19 @@ $app->bind('logger', function($app) {
 
 $app->bind('response', function($app) {
     $compileViewContext = function ($res, array $data) {
-        return new MagicObject([
-            'config' => $res->app->config,
-            'request' => $res->app->request,
-            'session' => $res->app->session,
-            'partial' => fn ($_, string $n, array $d = []) => $res->partial($n, $d),
-            'raw' => fn ($_, string $key) => $data[$key] ?? null,
-            'string' => fn ($_, string $key) => htmlspecialchars((string)($data[$key] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'),
-            'number' => fn ($_, string $key, int $decimals = 0) => number_format((float)($data[$key] ?? 0), $decimals),
-            'date' => fn ($_, string $key, string $f = DATE_ATOM) => date($f, strtotime($data[$key] ?? 'now')),
-        ]);
+        return new ViewContext(array_merge(
+            ['data' => $data], 
+            [
+                'config' => $res->app->config,
+                'request' => $res->app->request,
+                'session' => $res->app->session,
+                'partial' => fn ($_, string $n, array $d = []) => $res->partial($n, $d)
+            ]
+        ));
     };
 
-    $resolveTemplate = function (string $name) {
-        return __DIR__ . '/' . str_replace('.', '/', $name) . '.php';
+    $resolveTemplate = function ($name) {
+        return __DIR__ . '/' . str_replace('.', '/', (string)$name) . '.php';
     };
 
     return new MagicObject([
@@ -444,8 +501,8 @@ $app->bind('response', function($app) {
         'htmx' => new MagicObject([]),
         'setStatusCode' => function ($res, int $c) { $res->statusCode = $c; http_response_code($c); },
         'setHeader' => function ($_, string $n, string $v) { header("$n: $v"); },
-        'redirect' => function ($_, string $url) { header("Location: $url"); exit; },
-        'json' => function ($res, mixed $d, int $c = 200) { $res->setStatusCode($c); header('Content-Type: application/json'); echo json_encode($d); exit; },
+        'redirect' => function ($_, string $url) { header("Location: $url"); },
+        'json' => function ($res, mixed $d, int $c = 200) { $res->setStatusCode($c); header('Content-Type: application/json'); echo json_encode($d); },
         'partial' => function ($res, string $template, array $data = []) use ($compileViewContext, $resolveTemplate) {
             $view = $compileViewContext($res, $data);
             ob_start();
@@ -456,7 +513,7 @@ $app->bind('response', function($app) {
             $res->setStatusCode($statusCode);
 
             foreach ($res->htmx->props() as $key => $val) {
-                $header = 'HX-' . str_replace(' ', '-', ucwords(str_replace(['_', '-'], ' ', $key)));
+                $header = 'HX-' . str_replace(' ', '-', ucwords(str_replace(['_', '-'], ' ', (string)$key)));
                 $res->setHeader($header, is_array($val) ? json_encode($val) : (string)$val);
             }
 
@@ -483,12 +540,6 @@ $app->bind('log', function ($app, $next) {
     $app->logger("{$app->response->statusCode} ({$ms}ms)");
 });
 
-$app->bind('auth', function ($app, $next) {
-    $public = ['GET /login', 'POST /login'];
-    if (in_array("{$app->request->method} {$app->request->path}", $public)) return $next($app);
-    if (!$app->session->get('auth_user')) return $app->response->redirect('/login');
-    return $next($app);
-});
 
 $app->use('log');
 
@@ -496,4 +547,8 @@ $app->use('log');
 
 $app->addRoute('GET', '/health', fn($app) => $app->response->json(['ok' => true, 'time' => date(DATE_ATOM)]));
 
-$app->dispatch();
+if (realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) {
+    $app->dispatch();
+}
+
+return $app;
