@@ -152,6 +152,36 @@ $app = new App([
     'routes' => [],
     'globalMiddleware' => [],
     'registry' => [],
+    'commands' => [
+        'help' => function($app) {
+            echo <<<EOT
+          ┓
+┏┳┓┏┓┏┓┏┓┏┫
+┛┗┗┗┛┛┗┗┻┗┻ CLI
+Available commands:\n
+EOT;
+            foreach (array_keys($app->props()['commands']) as $cmd) {
+                echo "  - $cmd\n";
+            }
+        },
+        'routes' => function($app) {
+            $routes = $app->props()['routes'] ?? [];
+            if (empty($routes)) {
+                echo "  (No routes registered)\n";
+                return;
+            }
+            foreach ($routes as $method => $methodRoutes) {
+                foreach ($methodRoutes as $route) {
+                    $path = $route['path'] ?? $route['pattern'];
+                    $mw = implode(', ', array_map(fn($m) => is_string($m) ? $m : 'Closure', $route['middleware']));
+                    $mwStr = $mw ? " [$mw]" : "";
+                    $h = $route['handler'];
+                    $cntrl = is_array($h) ? $h[0] . '::' . $h[1] : (is_string($h) ? $h : 'Closure');
+                    echo "  " . str_pad("[$method]", 7) . " $path" . " [$cntrl] " . ($mwStr ? "($mw)" : "") . "\n";
+                }   
+            }
+        }
+    ],
     'groupStack' => [],
     'bind' => function ($app, string $name, mixed $value) { 
         unset($this->props[$name]); 
@@ -173,9 +203,29 @@ $app = new App([
         $path = $prefix . $p;
         $allMw = array_merge($groupMw, $mw);
         $pattern = '#^' . preg_replace('#:([a-zA-Z_][a-zA-Z0-9_]*)#', '(?P<$1>[^/]+)', $path) . '$#';
-        $this->routes[strtoupper($m)][] = ['pattern' => $pattern, 'handler' => $h, 'middleware' => $allMw];
+        $this->routes[strtoupper($m)][] = ['path' => $path, 'pattern' => $pattern, 'handler' => $h, 'middleware' => $allMw];
+    },
+    'addCommand' => function ($app, string $name, callable $handler) {
+        $this->commands[$name] = $handler;
     },
     'dispatch' => function ($app) {
+        if (php_sapi_name() === 'cli' && !defined('MONAD_TESTING')) {
+            global $argv;
+            $cmdName = $argv[1] ?? 'help';
+            $args = array_slice($argv, 2);
+            if (isset($this->commands[$cmdName])) {
+                try {
+                    return $this->commands[$cmdName]($app, $args);
+                } catch (Throwable $e) {
+                    $app->logger("CLI ERROR: " . $e->getMessage());
+                    echo "Error: " . $e->getMessage() . "\n";
+                    exit(1);
+                }
+            }
+            echo "Command '$cmdName' not found.\n";
+            return;
+        }
+
         $method = $this->request->method;
         $path = $this->request->path;
         $matched = null;

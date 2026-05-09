@@ -190,6 +190,33 @@ $app->db->delete('users', ['id' => $id]);
 
 ---
 
+## CLI
+
+Monad is not just for HTTP! It includes a built-in micro CLI. If you run `index.php` from the terminal, it will route the execution to your registered commands instead of the HTTP routes.
+
+```php
+// Register a command
+$app->addCommand('migrate', function($app, $args) {
+    echo "Running migrations...\n";
+    $app->db->execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY)');
+    echo "Done!\n";
+});
+```
+
+You can execute it from the terminal:
+```bash
+php index.php migrate
+```
+
+Or use the `monad` script and run it directly:
+
+```bash
+chmod +x monad
+./monad migrate
+```
+
+---
+
 ## Configuration (`monad.ini`)
 
 The `monad.ini` file manages settings. Monad automatically loads these values into both `$app->config` and **Environment Variables** (`getenv()`).
