@@ -519,12 +519,16 @@ $app->bind('response', function($app) {
 
             $view = $compileViewContext($res, $data);
             
+            $renderFile = function($path, $view, $slot = null) {
+                include $path;
+            };
+
             ob_start();
-            include $resolveTemplate($template);
+            $renderFile($resolveTemplate($template), $view);
             $slot = ob_get_clean();
 
             if ($res->layout && !$res->app->request->htmx->is) {
-                include $resolveTemplate($res->layout);
+                $renderFile($resolveTemplate($res->layout), $view, $slot);
             } else {
                 echo $slot;
             }
