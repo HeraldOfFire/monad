@@ -456,7 +456,8 @@ $app->bind('request', function($app) {
         'method' => $_SERVER['REQUEST_METHOD'] ?? 'GET',
         'path' => parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/',
         'params' => [],
-        'getPostVar' => fn ($_, string $n) => $_POST[$n] ?? null,
+        'getQueryVar' => fn($_, string $n, mixed $d = null) => $_GET[$n] ?? $d,
+        'getPostVar' => fn ($_, string $n, mixed $d = null) => $_POST[$n] ?? $d,
         'getHeader' => $getHeader,
         'body' => function () { static $c = null; if ($c === null) $c = file_get_contents('php://input'); return $c; },
         'htmx' => new MagicObject([
