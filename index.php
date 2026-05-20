@@ -1,5 +1,29 @@
 <?php
 
+/*
+ * Monad — A single-file PHP micro-framework.
+ *
+ * Architecture overview:
+ *
+ *   MagicObject   The base container. Holds all state in $props and resolves
+ *                 services lazily via __get(). Every service is a Singleton
+ *                 by default: the factory runs once, the result is cached.
+ *
+ *   App           Extends MagicObject. The single $app instance is the entry
+ *                 point for routing, DI, CLI dispatch, and configuration.
+ *
+ *   Services      Registered with $app->bind('name', fn($app) => ...).
+ *                 Closures are bound to $app via ->call(), so $this inside
+ *                 a factory refers to $app itself.
+ *
+ *   Dispatch      On HTTP: matches the request against registered routes,
+ *                 builds an Onion middleware pipeline, and runs it.
+ *                 On CLI: reads $argv and delegates to registered commands.
+ *
+ *   Testing       $app->test exposes a zero-boilerplate TestSuite.
+ *                 Run with: ./monad test
+ */
+
 namespace Monad;
 
 use PDO;
@@ -89,6 +113,12 @@ class MagicValue {
     public function raw() { return $this->v; }
 }
 
+/**
+ * MagicObject is the foundation of Monad's dependency injection and configuration.
+ * It stores resolved values in $props, and on first access resolves closure-based
+ * factories from the registry. Resolved services are cached, turning closures
+ * into singletons automatically.
+ */
 class MagicObject {
     protected array $props;
     public function __construct(array $props) { $this->props = $props; }
@@ -118,6 +148,11 @@ class MagicObject {
     }
 }
 
+/**
+ * ViewContext wraps dynamic view parameters to automatically apply secure,
+ * context-aware HTML escaping on string output via MagicValue, while allowing
+ * nested data objects/arrays to also remain wrapped.
+ */
 class ViewContext extends MagicObject implements View {
     public function __get(string $name): mixed {
         $v = parent::__get($name);
@@ -132,6 +167,225 @@ class ViewContext extends MagicObject implements View {
     public function count(): int { return count($this->props); }
 }
 
+class AssertionException extends \Exception {}
+
+class Assertion {
+    public function __construct(private mixed $actual) {}
+
+    public function toEqual(mixed $expected): void {
+        if ($this->actual !== $expected) {
+            throw new AssertionException("Expected " . var_export($expected, true) . " but got " . var_export($this->actual, true));
+        }
+    }
+
+    public function toBeTrue(): void {
+        if ($this->actual !== true) {
+            throw new AssertionException("Expected true but got " . var_export($this->actual, true));
+        }
+    }
+
+    public function toBeFalse(): void {
+        if ($this->actual !== false) {
+            throw new AssertionException("Expected false but got " . var_export($this->actual, true));
+        }
+    }
+
+    public function toContain(mixed $needle): void {
+        if (is_string($this->actual)) {
+            if (!str_contains($this->actual, $needle)) {
+                throw new AssertionException("Expected string to contain " . var_export($needle, true));
+            }
+        } elseif (is_array($this->actual)) {
+            if (!in_array($needle, $this->actual)) {
+                throw new AssertionException("Expected array to contain " . var_export($needle, true));
+            }
+        } else {
+            throw new AssertionException("Cannot use toContain on type " . gettype($this->actual));
+        }
+    }
+
+    public function toBeInstanceOf(string $class): void {
+        if (!($this->actual instanceof $class)) {
+            throw new AssertionException("Expected instance of $class but got " . (is_object($this->actual) ? get_class($this->actual) : gettype($this->actual)));
+        }
+    }
+}
+
+class TestSuite {
+    private array $tests = [];
+    private ?\Closure $beforeEach = null;
+    private ?\Closure $afterEach = null;
+
+    public function __construct(private App $app) {}
+
+    private ?string $currentFile = null;
+
+    public function setFile(string $file): void {
+        $this->currentFile = $file;
+    }
+
+    public function it(string $description, callable $fn): void {
+        $this->tests[] = ['desc' => $description, 'fn' => $fn, 'file' => $this->currentFile];
+    }
+
+    public function beforeEach(callable $fn): void {
+        $this->beforeEach = $fn instanceof \Closure ? $fn : \Closure::fromCallable($fn);
+    }
+
+    public function afterEach(callable $fn): void {
+        $this->afterEach = $fn instanceof \Closure ? $fn : \Closure::fromCallable($fn);
+    }
+
+    public function expect(mixed $actual): Assertion {
+        return new Assertion($actual);
+    }
+
+    public function assertThrows(callable $fn, string $expectedClass = \Exception::class): void {
+        try {
+            $fn();
+            throw new AssertionException("Expected exception $expectedClass was not thrown");
+        } catch (\Throwable $e) {
+            if (!($e instanceof $expectedClass)) {
+                throw new AssertionException("Expected exception $expectedClass but got " . get_class($e));
+            }
+        }
+    }
+
+    public function request(string $method, string $uri, array $options = []): object {
+        $backupServer = $_SERVER;
+        $backupGet = $_GET;
+        $backupPost = $_POST;
+        $backupFiles = $_FILES;
+
+        $_GET = [];
+        $_POST = $options['post'] ?? [];
+        $_FILES = $options['files'] ?? [];
+        
+        $method = strtoupper($method);
+        $_SERVER['REQUEST_METHOD'] = $method;
+        $_SERVER['REQUEST_URI'] = $uri;
+
+        $parts = parse_url($uri);
+        if (isset($parts['query'])) {
+            parse_str($parts['query'], $_GET);
+        }
+
+        foreach ($options['headers'] ?? [] as $name => $value) {
+            $serverKey = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
+            $_SERVER[$serverKey] = $value;
+        }
+
+        unset($this->app->request);
+        unset($this->app->response);
+
+        $headers = [];
+        $this->app->response->setHeader = function($res, $n, $v) use (&$headers) {
+            $headers[$n] = $v;
+        };
+        $this->app->response->redirect = function($res, $url) use (&$headers) {
+            $res->setStatusCode(302);
+            $headers['Location'] = $url;
+        };
+        $this->app->response->json = function($res, $d, int $c = 200) use (&$headers) {
+            $res->setStatusCode($c);
+            $headers['Content-Type'] = 'application/json';
+            echo json_encode($d);
+        };
+
+        ob_start();
+        $this->app->dispatch();
+        $body = ob_get_clean();
+
+        $statusCode = $this->app->response->statusCode;
+
+        $_SERVER = $backupServer;
+        $_GET = $backupGet;
+        $_POST = $backupPost;
+        $_FILES = $backupFiles;
+
+        unset($this->app->request);
+        unset($this->app->response);
+
+        return new class($statusCode, $headers, $body) {
+            public function __construct(
+                public int $statusCode,
+                public array $headers,
+                public string $body
+            ) {}
+            
+            public function getHeader(string $name): ?string {
+                foreach ($this->headers as $k => $v) {
+                    if (strcasecmp($k, $name) === 0) return $v;
+                }
+                return null;
+            }
+        };
+    }
+
+    public function run(): bool {
+        $passed = 0;
+        $failed = 0;
+        $output = "";
+        $currentFile = null;
+        $printLine = fn() => str_repeat("-", 128) . "\n";
+
+        $output .= $printLine();
+        $output .= "Monad Test Suite\n";
+        $output .= $printLine();
+
+        foreach ($this->tests as $test) {
+            if ($test['file'] !== null && $test['file'] !== $currentFile) {
+                $currentFile = $test['file'];
+                $output .= "\n\033[2m" . basename($currentFile) . "\033[0m\n";
+            }
+
+            $this->app->reset();
+
+            if ($this->beforeEach) {
+                ($this->beforeEach)($this->app);
+            }
+
+            try {
+                ($test['fn'])($this->app, $this);
+                $output .= "\033[32m✔\033[0m {$test['desc']}\n";
+                $passed++;
+            } catch (AssertionException $e) {
+                $output .= "\033[31m✖ {$test['desc']}\033[0m\n";
+                $output .= "  ↳ \033[33m" . $e->getMessage() . "\033[0m\n";
+                if (!empty($e->getFile())) {
+                    $output .= "    " . basename($e->getFile()) . ":" . $e->getLine() . "\n";
+                }
+                $failed++;
+            } catch (\Throwable $e) {
+                $output .= "\033[31m✖ {$test['desc']}\033[0m\n";
+                $output .= "  ↳ \033[31;1m[Unexpected Error]\033[0m \033[33m" . $e->getMessage() . "\033[0m\n";
+                $trace = $e->getTrace();
+                $output .= "    Stack trace:\n";
+                foreach (array_slice($trace, 0, 3) as $i => $frame) {
+                    $file = isset($frame['file']) ? basename($frame['file']) : 'internal';
+                    $line = $frame['line'] ?? '?';
+                    $func = ($frame['class'] ?? '') . ($frame['type'] ?? '') . ($frame['function'] ?? 'unknown');
+                    $output .= "      #$i $file:$line -> $func()\n";
+                }
+                $failed++;
+            }
+
+            if ($this->afterEach) {
+                ($this->afterEach)($this->app);
+            }
+        }
+
+        $output .= "\n";
+        $output .= $printLine();
+        $output .= "   Total: " . ($passed + $failed) . " | \033[32mPassed: $passed\033[0m | " . ($failed > 0 ? "\033[31mFailed: $failed\033[0m" : "Failed: 0") . "\n";
+        $output .= $printLine();
+
+        echo $output;
+
+        return $failed === 0;
+    }
+}
+
 /**
  * The Monad App - Inherits magic powers from MagicObject.
  * 
@@ -140,6 +394,7 @@ class ViewContext extends MagicObject implements View {
  * @property-read CSRF $csrf
  * @property-read Request $request
  * @property-read Response $response
+ * @property-read TestSuite $test
  * @property-read object $config
  */
 class App extends MagicObject {
@@ -152,6 +407,16 @@ class App extends MagicObject {
      */
     public function get(string $name): mixed {
         return $this->__get($name);
+    }
+
+    /**
+     * Resets all resolved service instances in the container,
+     * forcing them to be re-resolved on next access.
+     */
+    public function reset(): void {
+        foreach (array_keys($this->props['registry'] ?? []) as $key) {
+            unset($this->props[$key]);
+        }
     }
 }
 
@@ -202,8 +467,27 @@ EOT;
                 }   
             }
         },
-        'test' => function($app) {
-            passthru('php ' . __DIR__ . '/test.php');
+        'test' => function($app, $args = []) {
+            $target = $args[0] ?? 'tests.php';
+            $test = $app->test;
+            if (is_dir($target)) {
+                $dir = new \RecursiveDirectoryIterator($target);
+                $iterator = new \RecursiveIteratorIterator($dir);
+                foreach ($iterator as $file) {
+                    if (preg_match('/[Tt]est\.php$/', $file->getFilename())) {
+                        $test->setFile($file->getPathname());
+                        require_once $file->getPathname();
+                    }
+                }
+            } elseif (file_exists($target)) {
+                $test->setFile(realpath($target));
+                require $target;
+            } else {
+                echo "Test target '$target' not found.\n";
+                exit(1);
+            }
+            $passed = $test->run();
+            exit($passed ? 0 : 1);
         }
     ],
     'groupStack' => [],
@@ -275,6 +559,10 @@ EOT;
 
         $pipeline = array_map($resolver, array_merge($this->globalMiddleware, $matched['middleware']));
         $handler = $matched['handler'];
+        
+        // The middleware pipeline is resolved as an "Onion" chain:
+        // We wrap the final route handler and traverse the middleware array in reverse order,
+        // so that the first middleware in the pipeline is executed first.
         $chain = function ($app) use ($handler) {
             if (is_array($handler)) {
                 $controller = new $handler[0]();
@@ -295,7 +583,7 @@ EOT;
         $app->logger("ERROR: " . $e->getMessage());
         if (!($this->config->debug ?? false)) {
             if (($this->request->getHeader('Accept') ?? '') === 'application/json') {
-                $this->response->json(['error' => 'Internal Server Error']);
+                $this->response->json(['error' => 'Internal Server Error'], 500);
             }
             return;
         }
@@ -538,6 +826,10 @@ $app->bind('response', function($app) {
     ]);
 });
 
+$app->bind('test', function($app) {
+    return new TestSuite($app);
+});
+
 // --- MIDDLEWARES ---
 $app->bind('log', function ($app, $next) {
     $start = microtime(true);
@@ -552,6 +844,17 @@ $app->use('log');
 // --- ROUTES ---
 
 $app->addRoute('GET', '/health', fn($app) => $app->response->json(['ok' => true, 'time' => date(DATE_ATOM)]));
+
+// Catch fatal runtime errors (like E_ERROR or E_PARSE) that bypass standard try/catch blocks,
+// and route them safely through the application's central error handling system.
+register_shutdown_function(function() use ($app) {
+    $error = error_get_last();
+    if ($error && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
+        $app->renderError(new \ErrorException(
+            $error['message'], 0, $error['type'], $error['file'], $error['line']
+        ));
+    }
+});
 
 if (realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) {
     $app->dispatch();

@@ -244,21 +244,59 @@ If you embed Monad in another framework or a custom entry point, you can trigger
 
 ## Testing
 
-### Run tests via CLI
-The easiest way to run the tests is through the Monad CLI:
+Monad features a zero-boilerplate, CLI-driven testing engine. Tests run in isolation with a freshly reset container for each test case.
+
+### Running Tests
+
+Tests must be run exclusively via the Monad CLI:
 
 ```bash
+# Run the default test suite (tests.php)
 ./monad test
+
+# Run a single specific test file
+./monad test tests/UserTest.php
+
+# Run all test files (ending in *Test.php or *test.php) inside a folder recursively
+./monad test tests/
 ```
 
-### Run tests manually
-Alternatively, you can run the test script directly with PHP:
+### Writing Tests
 
-```bash
-php test.php
+Test files are completely free of setup boilerplate. The CLI automatically boots the framework and injects `$app` (the application instance) and `$test` (the test suite helper) directly into the test file scope.
+
+Example (`tests.php`):
+
+```php
+// Setup hooks run before/after each test case
+$test->beforeEach(function($app) {
+    $app->config->db = ['path' => ':memory:'];
+});
+
+// Register a test case
+$test->it("DI Container acts as a Singleton", function($app, $test) {
+    $app->bind('rand', fn() => rand(1, 1000000));
+    $test->expect($app->rand)->toEqual($app->rand);
+});
+
+// Simulate in-process HTTP requests
+$test->it("handles basic request simulation", function($app, $test) {
+    $response = $test->request('GET', '/health');
+    $test->expect($response->statusCode)->toEqual(200);
+});
 ```
 
-All tests are designed to run in isolation using an in-memory SQLite database, so they won't affect your development data.
+### Test API
+
+- `$test->it(string $desc, callable $fn)`: Registers a test case.
+- `$test->beforeEach(callable $fn)` / `$test->afterEach(callable $fn)`: Lifecycle hooks.
+- `$test->expect($actual)`: Starts a fluent assertion chain.
+  - `->toEqual($expected)`: Strict equality (===).
+  - `->toBeTrue()` / `->toBeFalse()`: Boolean checks.
+  - `->toContain($needle)`: String or array containment.
+  - `->toBeInstanceOf($class)`: Class type check.
+- `$test->assertThrows(callable $fn, string $exceptionClass)`: Asserts that code throws a specific exception.
+- `$test->request(string $method, string $uri)`: Simulates an in-process HTTP request.
 
 ---
 
