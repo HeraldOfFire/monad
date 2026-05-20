@@ -458,6 +458,7 @@ $app->bind('request', function($app) {
         'params' => [],
         'getQueryVar' => fn($_, string $n, mixed $d = null) => $_GET[$n] ?? $d,
         'getPostVar' => fn ($_, string $n, mixed $d = null) => $_POST[$n] ?? $d,
+        'getFile' => fn ($_, string $n) => $_FILES[$n] ?? null,
         'getHeader' => $getHeader,
         'body' => function () { static $c = null; if ($c === null) $c = file_get_contents('php://input'); return $c; },
         'htmx' => new MagicObject([
