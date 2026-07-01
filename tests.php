@@ -57,6 +57,15 @@ $test->it("DI Container: Closure context can access other services via \$this", 
     $test->expect($app->serviceB)->toEqual("AB");
 });
 
+$test->it("DI Container: reset() clears all cached services", function($app, $test) {
+    $app->bind('counter', function() { static $n = 0; return ++$n; });
+    $first = $app->counter;
+    $app->reset();
+    $second = $app->counter;
+    $test->expect($first)->toEqual(1);
+    $test->expect($second)->toEqual(2);
+});
+
 // --- 2. SESSION ---
 $test->it("Session: stores and retrieves values", function($app, $test) {
     $app->session->set('user_id', 42);
@@ -109,6 +118,14 @@ $test->it("Router: maintains middleware execution order (Onion pattern)", functi
     $test->expect($trace)->toEqual("1_in 2_in CORE 2_out 1_out");
 });
 
+$test->it("Router: extracts URL parameters", function($app, $test) {
+    $app->addRoute('GET', '/users/:id/posts/:postId', function($app) use ($test) {
+        $test->expect($app->request->params['id'])->toEqual('42');
+        $test->expect($app->request->params['postId'])->toEqual('7');
+    });
+    $test->request('GET', '/users/42/posts/7');
+});
+
 // --- 5. DATABASE ---
 $test->it("DB: can perform full CRUD on memory DB", function($app, $test) {
     $app->db->pdo->exec("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)");
@@ -127,6 +144,24 @@ $test->it("DB: can perform full CRUD on memory DB", function($app, $test) {
 $test->it("DB: protects against SQL Injection in column names", function($app, $test) {
     $test->assertThrows(function() use ($app) {
         $app->db->insert('users', ['id; DROP TABLE users' => 1]);
+    }, \InvalidArgumentException::class);
+});
+
+$test->it("DB: protects against invalid table names in insert", function($app, $test) {
+    $test->assertThrows(function() use ($app) {
+        $app->db->insert('users; DROP TABLE users', ['name' => 'test']);
+    }, \InvalidArgumentException::class);
+});
+
+$test->it("DB: protects against invalid table names in update", function($app, $test) {
+    $test->assertThrows(function() use ($app) {
+        $app->db->update('users; DROP', ['name' => 'test'], ['id' => 1]);
+    }, \InvalidArgumentException::class);
+});
+
+$test->it("DB: protects against invalid table names in delete", function($app, $test) {
+    $test->assertThrows(function() use ($app) {
+        $app->db->delete('users; DROP', ['id' => 1]);
     }, \InvalidArgumentException::class);
 });
 
@@ -158,6 +193,25 @@ $test->it("View: layouts wrap templates correctly", function($app, $test) {
     $test->expect($res->body)->toEqual('<html>content</html>');
 });
 
+$test->it("View: MagicValue json() encodes and escapes values", function($app, $test) {
+    $v = new \Monad\MagicValue(['a' => 1, 'b' => 2]);
+    $test->expect($v->json())->toEqual('{&quot;a&quot;:1,&quot;b&quot;:2}');
+});
+
+$test->it("View: MagicValue json() throws on non-serializable value", function($app, $test) {
+    $test->assertThrows(function() {
+        $v = new \Monad\MagicValue(fopen('php://memory', 'r'));
+        $v->json();
+    }, \RuntimeException::class);
+});
+
+$test->it("View: MagicValue date() formats timestamps", function($app, $test) {
+    file_put_contents(__DIR__ . '/test_date.php', '<?= $view->data->ts->date("Y") ?>');
+    $out = $app->response->partial('test_date', ['ts' => strtotime('2024-03-15')]);
+    unlink(__DIR__ . '/test_date.php');
+    $test->expect($out)->toEqual('2024');
+});
+
 // --- 7. RESPONSE & HTMX ---
 $test->it("Response: generates HTMX headers from props", function($app, $test) {
     $app->addRoute('GET', '/htmx-headers', function($app) {
@@ -168,6 +222,37 @@ $test->it("Response: generates HTMX headers from props", function($app, $test) {
     });
     $res = $test->request('GET', '/htmx-headers');
     $test->expect($res->getHeader('HX-Trigger'))->toEqual('refresh');
+});
+
+$test->it("Response: redirect sets Location header and status 302", function($app, $test) {
+    $app->addRoute('GET', '/redirect-me', function($app) {
+        $app->response->redirect('/target');
+    });
+    $res = $test->request('GET', '/redirect-me');
+    $test->expect($res->statusCode)->toEqual(302);
+    $test->expect($res->getHeader('Location'))->toEqual('/target');
+});
+
+$test->it("Response: json() sets Content-Type header", function($app, $test) {
+    $app->addRoute('GET', '/api-data', function($app) {
+        $app->response->json(['status' => 'ok']);
+    });
+    $res = $test->request('GET', '/api-data');
+    $test->expect($res->getHeader('Content-Type'))->toEqual('application/json');
+    $test->expect($res->body)->toEqual('{"status":"ok"}');
+});
+
+$test->it("Response: layout skipped during HTMX requests", function($app, $test) {
+    file_put_contents(__DIR__ . '/layout_htmx.php', '<wrap><?= $slot ?></wrap>');
+    file_put_contents(__DIR__ . '/fragment.php', 'partial');
+    $app->addRoute('GET', '/htmx-fragment', function($app) {
+        $app->response->layout = 'layout_htmx';
+        $app->response->render('fragment');
+    });
+    $res = $test->request('GET', '/htmx-fragment', ['headers' => ['HX-Request' => 'true']]);
+    unlink(__DIR__ . '/layout_htmx.php');
+    unlink(__DIR__ . '/fragment.php');
+    $test->expect($res->body)->toEqual('partial');
 });
 
 // --- 8. CLI ---
@@ -189,6 +274,21 @@ $test->it("Request: detects HTMX headers", function($app, $test) {
         $test->expect($app->request->htmx->is)->toBeTrue();
     });
     $test->request('GET', '/htmx-route', ['headers' => ['HX-Request' => 'true']]);
+});
+
+$test->it("Request: getQueryVar retrieves query string parameters", function($app, $test) {
+    $app->addRoute('GET', '/q', function($app) use ($test) {
+        $test->expect($app->request->getQueryVar('page'))->toEqual('2');
+        $test->expect($app->request->getQueryVar('missing', 'fallback'))->toEqual('fallback');
+    });
+    $test->request('GET', '/q?page=2');
+});
+
+$test->it("Request: getPostVar retrieves POST body parameters", function($app, $test) {
+    $app->addRoute('POST', '/submit', function($app) use ($test) {
+        $test->expect($app->request->getPostVar('name'))->toEqual('Mario');
+    });
+    $test->request('POST', '/submit', ['post' => ['name' => 'Mario']]);
 });
 
 // --- 10. ERROR HANDLING ---

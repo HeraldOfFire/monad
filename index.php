@@ -109,7 +109,7 @@ class MagicValue {
     public function number(int $d = 0): string { return number_format((float)($this->v ?? 0), $d); }
     public function date(string $f = 'Y-m-d'): string { return date($f, is_numeric($this->v) ? (int)$this->v : strtotime((string)($this->v ?? 'now'))); }
     public function default(mixed $f): mixed { return empty($this->v) ? new MagicValue($f) : $this; }
-    public function json(): string { return htmlspecialchars(json_encode($this->v), ENT_QUOTES, 'UTF-8'); }
+    public function json(): string { $j = json_encode($this->v); if ($j === false) throw new \RuntimeException('JSON encoding failed: ' . json_last_error_msg()); return htmlspecialchars($j, ENT_QUOTES, 'UTF-8'); }
     public function raw() { return $this->v; }
 }
 
@@ -675,6 +675,7 @@ $app->bind('db', function($app) {
         'fetchAll' => function ($db, string $sql, array $params = []): array { return $db->query($sql, $params)->fetchAll(); },
         'execute' => function ($db, string $sql, array $params = []): int { return $db->query($sql, $params)->rowCount(); },
         'insert' => function ($db, string $table, array $data): int {
+            if (!preg_match('/^[a-zA-Z0-9_]+$/', $table)) throw new \InvalidArgumentException("Invalid table name");
             $safeKeys = array_filter(array_keys($data), fn($k) => preg_match('/^[a-zA-Z0-9_]+$/', $k));
             if (count($safeKeys) !== count($data)) throw new \InvalidArgumentException("Invalid column name in insert data");
             $cols = implode(', ', $safeKeys);
@@ -683,6 +684,7 @@ $app->bind('db', function($app) {
             return (int) $db->pdo->lastInsertId();
         },
         'update' => function ($db, string $table, array $data, array $where): int {
+            if (!preg_match('/^[a-zA-Z0-9_]+$/', $table)) throw new \InvalidArgumentException("Invalid table name");
             $safeDataKeys = array_filter(array_keys($data), fn($k) => preg_match('/^[a-zA-Z0-9_]+$/', $k));
             $safeWhereKeys = array_filter(array_keys($where), fn($k) => preg_match('/^[a-zA-Z0-9_]+$/', $k));
             if (count($safeDataKeys) !== count($data) || count($safeWhereKeys) !== count($where)) throw new \InvalidArgumentException("Invalid column name in update data");
@@ -694,6 +696,7 @@ $app->bind('db', function($app) {
             return $db->execute("UPDATE $table SET $set WHERE $cond", $params);
         },
         'delete' => function ($db, string $table, array $where): int {
+            if (!preg_match('/^[a-zA-Z0-9_]+$/', $table)) throw new \InvalidArgumentException("Invalid table name");
             $safeWhereKeys = array_filter(array_keys($where), fn($k) => preg_match('/^[a-zA-Z0-9_]+$/', $k));
             if (count($safeWhereKeys) !== count($where)) throw new \InvalidArgumentException("Invalid column name in delete data");
             $cond = implode(' AND ', array_map(fn($k) => "$k = :$k", $safeWhereKeys));
@@ -707,6 +710,7 @@ $app->bind('session', function() {
         session_start([
             'cookie_httponly' => true,
             'cookie_samesite' => 'Lax',
+            'cookie_secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
             'use_strict_mode' => true
         ]);
     }
@@ -856,7 +860,7 @@ register_shutdown_function(function() use ($app) {
     }
 });
 
-if (realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) {
+if (!empty($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) {
     $app->dispatch();
 }
 
