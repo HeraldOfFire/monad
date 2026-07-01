@@ -1,0 +1,19 @@
+{
+  "name": "heraldoffire/monad",
+  "description": "A single-file PHP micro-framework.",
+  "type": "project",
+  "license": "MIT",
+  "require": {
+    "php": ">=8.0",
+    "ext-pdo": "*"
+  },
+  "scripts": {
+    "post-create-project-cmd": [
+      "cp -n monad.example.ini monad.ini",
+      "echo ''",
+      "echo '  Monad is ready!'",
+      "echo '  Start the dev server: php -S localhost:8000 -t .'",
+      "echo ''"
+    ]
+  }
+}
