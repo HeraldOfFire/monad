@@ -9,11 +9,7 @@
   },
   "scripts": {
     "post-create-project-cmd": [
-      "cp -n monad.example.ini monad.ini",
-      "echo ''",
-      "echo '  Monad is ready!'",
-      "echo '  Start the dev server: php -S localhost:8000 -t .'",
-      "echo ''"
+      "cp -n monad.example.ini monad.ini"
     ]
   }
 }
