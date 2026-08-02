@@ -2,12 +2,15 @@
 
 Monad is an experimental, ultra-lightweight PHP micro-framework contained in a single `index.php`. It leverages metaprogramming and PHP magic methods to offer an extremely smooth development experience, focused on modern Server-Side Rendering (SSR) and natively integrated with HTMX.
 
+Despite the tiny core, it ships a surprisingly complete feature set out of the box: DI container, router with onion middleware, auto-escaping view engine, PDO wrapper, sessions, flash messages, CSRF, authentication, filesystem cache, schema migrations and a built-in test runner.
+
 ## Philosophy
 *   **Monofile Core**: The entire framework engine resides in `index.php`.
 *   **Zero Dependencies**: Works standalone. If you use Composer, `vendor/autoload.php` is automatically detected and integrated.
 *   **HTMX First**: Intelligent layout and HTMX header management to build Single Page Applications (SPA) writing only PHP and HTML.
 *   **Fluent & Recursive View Context**: Security first with a modern twist. Views are recursive objects that provide fluent helpers and automatic XSS protection.
 *   **Onion Middleware**: A recursive middleware system that allows processing requests both "on the way in" and "on the way out".
+*   **Batteries Included**: Sessions, flash messages, CSRF, auth, caching and migrations are built-in and opt-in.
 *   **MagicObject**: The heart of Monad. It allows defining dynamic behaviors and lazy-loading with a clean and expressive syntax.
 
 ---
@@ -32,7 +35,16 @@ Monad requires **PHP 8.0+** and **PDO extension**.
     ```bash
     php -S localhost:8000 -t .
     ```
-3.  Optional: configure your database in the `monad.ini` file.
+3.  Optional: configure your database, auth, cache and migrations in the `monad.ini` file.
+
+All framework classes live in the `Monad` namespace (declared at the top of `index.php`), so app code typically starts with:
+
+```php
+use Monad\App;
+use Monad\MagicObject;
+use Monad\MagicValue;
+use Monad\RawHtml;
+```
 
 ---
 
@@ -87,11 +99,23 @@ $app->db->select('users', ['id' => 1]);
 ``` 
 Just remember that when overriding internal services, custom services **must implement Monad interfaces** (i.e. `Monad\DB`) and you won't get any custom methods autocompletion for them.
 
---- 
+Services are singletons: a factory runs once and the result is cached. Call `$app->reset()` to clear all resolved instances and force re-resolution.
+
+### Shared view globals
+Expose a lazily-resolved global to every template with `$app->share()`:
+
+```php
+$app->share('stats', fn($app) => new StatsService());
+// In any template: $view->stats->today()
+```
+
+Globals resolve lazily (declaring one costs nothing until a template touches it). `auth`, `flash` and `csrf` are already shared for you.
+
+---
 
 ## Routing and Middleware
 
-Registering routes is simple. Monad supports dynamic URL parameters and middleware.
+Registering routes is simple. Monad supports dynamic URL parameters, route groups, named middleware and full controllers.
 
 ```php
 // A global middleware
@@ -102,17 +126,24 @@ $app->use(function ($app, $next) {
     return $response;
 });
 
-// Route group protected by 'auth' middleware
-$app->group('/admin', ['auth'], function($app) {
-    
+// Route group protected by a named middleware
+$app->group('/admin', ['requireAuth'], function($app) {
+
     $app->addRoute('GET', '/dashboard', function($app) {
         $app->response->render('admin.dashboard', ['title' => 'Admin Dashboard']);
     });
-    
+
 });
 ```
 
 Full controllers are supported by passing an array `[Class::class, 'method']`.
+
+Routing behaviors:
+
+* URL parameters use `:param` syntax: `/users/:id` → `$app->request->params['id']` (percent-decoded).
+* **404 responses have a body** (JSON or HTML depending on the `Accept` header).
+* A known path with the wrong verb returns **405 with an `Allow` header**.
+* Middleware can be bound by name with `$app->bind()` and referenced as a string. An unbound name throws a clear error. A service closure used as middleware (one that only accepts `$app`) is rejected at dispatch time instead of silently aborting the chain.
 
 ---
 
@@ -150,15 +181,34 @@ $app->response->render('html.pages.home', [
 <?php if ($view->session->has('auth')): ?>
     <p>Logged in as <?= $view->session->get('username') ?></p>
 <?php endif; ?>
+
+<!-- Shared globals (auth / flash / csrf / anything you shared) -->
+<?php if ($view->auth->check()): ?>
+    <p>Ciao, <?= $view->auth->user()->name ?></p>
+<?php endif; ?>
 ```
 
-Templates are resolved using **dot notation** relative to the project root. For example, `html.admin.dashboard` maps to `./html/admin/dashboard.php`.
+Templates are resolved using **dot notation** relative to the project root. For example, `html.admin.dashboard` maps to `./html/admin/dashboard.php`. Template names are validated (no slashes, no `..`) so they can never escape the view root.
+
+### Escaping semantics
+* Values are wrapped in `MagicValue`, whose `__toString()` HTML-escapes automatically. Helpers: `->number($d)`, `->date($fmt)`, `->default($fallback)`, `->json()`, `->raw()`.
+* `MagicValue` implements `Stringable` and `JsonSerializable`: a value that was escaped still serializes to its raw form in `json_encode` (previously it came out as `{}`).
+* `->date()` returns an empty string on unparseable input instead of silently falling back to the Unix epoch.
+* Service objects reached from a template (`$view->request`, `$view->session`, `$view->auth`) are wrapped in a `ViewProxy` so values read *through* them are escaped too, while booleans stay real booleans (`if ($view->request->htmx->is)` stays honest).
+* Markup that is already safe is returned as `RawHtml` and emitted verbatim: `$view->partial(...)`, `$view->dump(...)` and the CSRF helpers.
+
+### Partials & debugging
+```php
+<?= $view->partial('partials.header', ['title' => 'Home']) ?>
+<?= $view->dump($data) ?>   <!-- <pre> var_dump, escaped, trusted markup -->
+```
+Outside templates, use `$app->dump(...)` (or `$app->dd(...)` to die), and `$app->dumpHtml(...)` to get the HTML string.
 
 ---
 
 ## HTMX Integration
 
-[HTMX](https://htmx.org) is a powerful frontend library that allows you to access AJAX, WebSockets, and Server Sent Events directly in HTML, using standard attributes. 
+[HTMX](https://htmx.org) is a powerful frontend library that allows you to access AJAX, WebSockets, and Server Sent Events directly in HTML, using standard attributes.
 
 Monad is designed from the ground up to pair perfectly with HTMX. It knows when a request comes from HTMX (`$app->request->htmx->is`).
 If you call `$app->response->render(...)` during an HTMX request, the main `layout` is **automatically ignored**, returning only the requested HTML fragment!
@@ -168,6 +218,24 @@ Furthermore, you can send commands to the HTMX frontend using the Response's mag
 // Trigger a JS event on the client
 $app->response->htmx->trigger = 'updateList';
 $app->response->render('user_list', [...]);
+```
+Any property set on `$app->response->htmx` becomes an `HX-*` response header.
+
+### HTMX-specific response helpers
+```php
+// Navigate the browser instead of swapping a fragment (e.g. after login/logout)
+$app->response->htmxRedirect('/login');
+
+// Append an out-of-band fragment after the main body
+// (its root element must carry hx-swap-oob="true")
+$app->response->oob('cart.count', ['n' => 3]);
+
+// Server-Sent Events stream. $emit returns false once the client disconnects.
+$app->response->stream(function($emit, $app) {
+    while ($emit('tick')) {
+        usleep(1_000_000);
+    }
+});
 ```
 
 ---
@@ -190,6 +258,165 @@ $app->db->update('users', ['role' => 'user'], ['id' => $id]);
 
 // Delete
 $app->db->delete('users', ['id' => $id]);
+
+// Transactions: commit on success, rollback and rethrow on any Throwable.
+// Nested transaction() calls join the outer transaction.
+$app->db->transaction(function($db) {
+    $db->insert('users', ['username' => 'mario']);
+    $db->update('accounts', ['balance' => 100], ['id' => 1]);
+});
+```
+
+Table and column names are validated against `/^[a-zA-Z0-9_]+$/` — invalid names throw `InvalidArgumentException`. All values are bound parameters, so queries are injection-safe.
+
+---
+
+## Authentication
+
+The `auth` service is session-based and reads a user table you define. It is fully opt-in: nothing touches the database until you call it, and no table is auto-created.
+
+### Configuration (`monad.ini`)
+```ini
+[auth]
+table = "users"
+identifier = "email"
+password = "password"
+loginPath = "/login"
+```
+
+### Service API
+```php
+// Registration
+$app->db->insert('users', [
+    'email'    => 'mario@example.com',
+    'password' => $app->auth->hash('secret123'),
+]);
+
+// Login
+if ($app->auth->attempt('mario@example.com', 'secret123')) {
+    $app->response->redirect('/dashboard');
+}
+
+// Auth state
+$app->auth->check();   // bool
+$app->auth->id();      // user id or null
+$app->auth->user();    // row without the password column, or null
+
+// Logout (clears the identity and regenerates the session)
+$app->auth->logout();
+```
+
+### Protecting routes
+`requireAuth` is a built-in middleware. Reference it by name on a route, a group, or globally:
+
+```php
+$app->use('requireAuth');
+$app->addRoute('GET', '/dashboard', handler, ['requireAuth']);
+$app->group('/admin', ['requireAuth'], function($app) { ... });
+```
+
+When unauthenticated it: redirects to `loginPath` (302) for browser requests, answers `401 {"error":"Unauthenticated"}` for JSON clients, and sends an `HX-Redirect` for HTMX requests.
+
+### Notes
+* The login form and `/login` route are up to your app.
+* Login state is just the user id stored in the session (`_auth_id`); `login()` regenerates the session id to prevent fixation.
+* The password hash is never exposed through `user()`.
+
+---
+
+## Sessions, Flash & CSRF
+
+### Sessions
+Cookies are hardened by default: `HttpOnly`, `SameSite=Lax`, `Secure` behind HTTPS, strict session id mode.
+
+```php
+$app->session->set('theme', 'dark');
+$app->session->get('theme');     // 'dark'
+$app->session->has('theme');     // true
+$app->session->regenerate();     // session_regenerate_id
+$app->session->destroy();
+```
+
+### Flash messages
+One-shot session messages, the backbone of the POST → redirect → show pattern. Reading a key consumes it.
+
+```php
+// After handling a POST, before redirecting
+$app->flash->set('success', 'Transazione salvata!');
+$app->response->redirect('/transactions');
+
+// In the next request's template or controller
+$app->flash->has('success');      // true
+$app->flash->get('success');      // 'Transazione salvata!' (and it's now gone)
+$app->flash->peek('success');     // read without consuming
+$app->flash->all();               // drain everything
+```
+
+### CSRF
+Tokens are per-key, capped at 32 entries. Generation and verification are always available:
+
+```php
+$app->csrf->token();            // generate/read
+$app->csrf->rotate();
+$app->csrf->verify($token);
+```
+
+Markup helpers return `RawHtml` so the view layer emits them verbatim:
+```html
+<!-- Plain HTML form -->
+<?= $view->csrf->field() ?>               <!-- <input type="hidden" name="_csrf" ...> -->
+<!-- HTMX: put on <body>, it is inherited by all requests -->
+<body <?= $view->csrf->htmxAttribute() ?>> <!-- hx-headers='{"X-CSRF-Token":"..."}' -->
+```
+
+Enforcement is **opt-in** via the `verifyCsrf` middleware (checks POST/PUT/PATCH/DELETE against the form field or the `X-CSRF-Token` header, returns 403 on mismatch):
+
+```php
+$app->use('verifyCsrf');          // globally
+// or per route/group: ['verifyCsrf']
+```
+
+---
+
+## Caching
+
+A small filesystem cache with atomic writes (temp file + rename, so a concurrent reader never sees a half-written entry).
+
+```php
+$app->cache->set('key', $value, 3600);     // TTL in seconds; 0 = never expires
+$app->cache->get('key', $default);
+$app->cache->has('key');
+$app->cache->remember('key', 3600, fn() => $expensiveComputation());
+$app->cache->forget('key');
+$app->cache->flush();                       // returns the number of removed files
+```
+
+```ini
+[cache]
+path = "cache"
+```
+
+---
+
+## Migrations
+
+A migration is a plain PHP file returning `up`/`down` closures that receive the `db` service. Files run inside a transaction (SQLite supports transactional DDL), and state lives in a `_migrations` table.
+
+`migrations/001_create_users.php`:
+```php
+return [
+    'up' => function($db) {
+        $db->execute('CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE, password TEXT)');
+    },
+    'down' => function($db) {
+        $db->execute('DROP TABLE users');
+    },
+];
+```
+
+```ini
+[migrations]
+path = "migrations"
 ```
 
 ---
@@ -200,30 +427,43 @@ Monad is not just for HTTP! It includes a built-in micro CLI. If you run `index.
 
 ```php
 // Register a command
-$app->addCommand('migrate', function($app, $args) {
-    echo "Running migrations...\n";
-    $app->db->execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY)');
+$app->addCommand('db:reset', function($app, $args) {
+    echo "Resetting database...\n";
+    $app->db->execute('DROP TABLE IF EXISTS users');
     echo "Done!\n";
 });
 ```
 
 You can execute it from the terminal:
 ```bash
-php index.php migrate
+php index.php db:reset
 ```
 
 Or use the `monad` script and run it directly:
-
 ```bash
 chmod +x monad
-./monad migrate
+./monad db:reset
 ```
+
+Built-in commands:
+
+| Command | Purpose |
+| --- | --- |
+| `./monad help` | List available commands |
+| `./monad routes` | List registered routes |
+| `./monad migrate` | Apply all pending migrations (one batch) |
+| `./monad migrate:rollback` | Undo the last batch |
+| `./monad migrate:status` | Show which migrations have run / are pending |
+| `./monad migrate:make <name>` | Scaffold a new migration file |
+| `./monad test` | Run the test suite |
 
 ---
 
 ## Embedding Monad in Other Applications
 
 Monad is great on its own, but it's also designed to be embeddable. If you `require` or `include` `index.php` from another script, it will **not** execute the router automatically. Instead, it will return the `$app` instance, allowing you to use Monad as a service container or a library.
+
+Auto-dispatch is detected via `get_included_files()[0]` — the real entry script on every SAPI — so embedding from another file never triggers a second, silent dispatch.
 
 ### Use Monad in standalone scripts
 You can reuse your database connection, configuration, and services in cron jobs or background tasks:
@@ -259,6 +499,9 @@ Tests must be run exclusively via the Monad CLI:
 
 # Run all test files (ending in *Test.php or *test.php) inside a folder recursively
 ./monad test tests/
+
+# Only tests whose description contains "csrf"
+./monad test tests.php --filter=csrf
 ```
 
 ### Writing Tests
@@ -268,9 +511,15 @@ Test files are completely free of setup boilerplate. The CLI automatically boots
 Example (`tests.php`):
 
 ```php
-// Setup hooks run before/after each test case
+// Setup hooks run before/after each test case (they accumulate)
 $test->beforeEach(function($app) {
     $app->config->db = ['path' => ':memory:'];
+});
+$test->beforeAll(function($app) {
+    // runs once, before the first test
+});
+$test->afterAll(function($app) {
+    // runs once, after the last test
 });
 
 // Register a test case
@@ -289,14 +538,15 @@ $test->it("handles basic request simulation", function($app, $test) {
 ### Test API
 
 - `$test->it(string $desc, callable $fn)`: Registers a test case.
-- `$test->beforeEach(callable $fn)` / `$test->afterEach(callable $fn)`: Lifecycle hooks.
+- `$test->beforeEach(callable $fn)` / `$test->afterEach(callable $fn)`: Lifecycle hooks, run per case.
+- `$test->beforeAll(callable $fn)` / `$test->afterAll(callable $fn)`: Lifecycle hooks, run once.
 - `$test->expect($actual)`: Starts a fluent assertion chain.
   - `->toEqual($expected)`: Strict equality (===).
   - `->toBeTrue()` / `->toBeFalse()`: Boolean checks.
   - `->toContain($needle)`: String or array containment.
   - `->toBeInstanceOf($class)`: Class type check.
 - `$test->assertThrows(callable $fn, string $exceptionClass)`: Asserts that code throws a specific exception.
-- `$test->request(string $method, string $uri)`: Simulates an in-process HTTP request.
+- `$test->request(string $method, string $uri, array $options = [])`: Simulates an in-process HTTP request. Options: `headers`, `post`, `files`. Returns `{statusCode, headers, body}`.
 
 ---
 
@@ -309,30 +559,31 @@ debug = true
 
 [db]
 path = "db.sqlite"
+
+[auth]
+table = "users"
+identifier = "email"
+password = "password"
+loginPath = "/login"
+
+[cache]
+path = "cache"
+
+[migrations]
+path = "migrations"
+
+[views]
+path = "views"
 ```
+
+The `views` path is optional: templates default to the project root. Putting them outside the docroot (e.g. `path = "views"`) keeps them from being directly requestable over HTTP.
 
 ---
 
 ## Tips
 
-### 1. CSRF Protection
-Monad includes built-in CSRF protection. To secure your POST forms, generate a token in your controller and add it as a hidden field in your HTML:
-
-```php
-// In your route/controller
-$app->addRoute('GET', '/login', function($app) {
-    $app->response->render('login', [
-        'csrf' => $app->csrf->token()
-    ]);
-});
-```
-```html
-<!-- In your template -->
-<input type="hidden" name="_csrf" value="<?= $view->csrf ?>">
-```
-
-### 2. Production Deployment
-Since Monad routes everything through a single file, you need to configure your web server (like Nginx or Apache) to send all traffic to `index.php`. 
+### 1. Production Deployment
+Since Monad routes everything through a single file, you need to configure your web server (like Nginx or Apache) to send all traffic to `index.php`.
 
 Example for **Nginx**:
 ```nginx
@@ -341,5 +592,11 @@ location / {
 }
 ```
 
-### 3. Dev-Friendly Error Page
+### 2. Dev-Friendly Error Page
 When `debug = true` in your `monad.ini`, Monad catches any unhandled exceptions or fatal errors and displays a beautiful, dev-friendly HTML error page showing the exact file, line number, and a full stack trace. When `debug = false` (e.g. in production), it safely hides the details and returns a generic 500 Server Error to protect your application.
+
+Error handling details:
+* API requests (`Accept: application/json`) get JSON errors instead of HTML.
+* CLI errors are reported as plain text on STDERR.
+* PHP deprecations are logged, not promoted to exceptions.
+* A reentrancy guard prevents an error raised while reporting an error from replacing the original one.
